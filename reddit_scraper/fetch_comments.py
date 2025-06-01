@@ -19,7 +19,7 @@ def fetch_post_comments(post_id, output_dir="data/raw"):
     submission = reddit.submission(id=post_id)
     submission.comments.replace_more(limit=None)
 
-    comment_tree = []
+    post_title = submission.title  # ✅ get the title of the post
 
     def collect_comments(comment_list, parent=None):
         results = []
@@ -32,7 +32,8 @@ def fetch_post_comments(post_id, output_dir="data/raw"):
                 "author": str(comment.author),
                 "created_utc": comment.created_utc,
                 "permalink": f"https://reddit.com{comment.permalink}",
-                "depth": comment.depth
+                "depth": comment.depth,
+                "post_title": post_title   # ✅ include post title in each comment
             })
             if hasattr(comment, "replies"):
                 results.extend(collect_comments(comment.replies, comment.id))
