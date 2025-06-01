@@ -2,3 +2,7 @@
 venv
 data
 offload
+images
+preprocessing/__pycache__
+reddit_scraper/__pycache__
+scripts/__pycache__
