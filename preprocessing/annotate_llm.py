@@ -1,25 +1,24 @@
-# preprocessing/annotate_llm.py
-
 import os
 import json
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
+BATCH_SIZE = 16  # You can increase if you have more memory
+MODEL_NAME = "deepseek-ai/deepseek-llm-7b-chat"  # or use a quantized version for speed
 
 # Load DeepSeek LLM
 def load_deepseek_pipeline():
-    model_name = "deepseek-ai/deepseek-llm-7b-chat"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map="auto",  # auto-load to GPU if available
+        MODEL_NAME,
+        device_map="auto",
+        offload_folder="./offload",
         trust_remote_code=True,
         torch_dtype="auto"
     )
     return pipeline("text-generation", model=model, tokenizer=tokenizer)
 
-
-# Load comments from disk
+# Load all comment files
 def load_all_comments(raw_dir="data/raw"):
     all_comments = []
     for filename in os.listdir(raw_dir):
@@ -28,46 +27,66 @@ def load_all_comments(raw_dir="data/raw"):
                 all_comments += json.load(f)
     return all_comments
 
+# Generate prompt for classification
+def generate_prompt(title, comment):
+    return f"""Determine if the comment is "Related" or "Not Related" to the post title.
 
-# Classify using DeepSeek
-def classify_comment(comment_text, generator):
-    prompt = f"""
-You are an assistant classifying Reddit comments. Label each comment as either "Informative" or "Not Informative".
+Post Title: {title}
+Comment: {comment}
+Label:"""
 
-Informative comments provide facts, explanations, answers, or helpful advice.
-Not Informative comments are jokes, sarcasm, vague, or add no value.
-
-Comment: "{comment_text}"
-
-Label: [Informative / Not Informative]
-"""
+# Parse label from generated output
+def extract_label(response_text):
     try:
-        result = generator(prompt, max_new_tokens=20, do_sample=False)[
-            0]['generated_text']
-        if "Informative" in result and "Not" not in result:
-            return "Informative"
-        return "Not Informative"
-    except Exception as e:
-        print(f"Error: {e}")
+        label_line = response_text.split("Label:")[-1].strip().lower()
+        if "related" in label_line:
+            return "Related"
+        return "Not Related"
+    except Exception:
         return "ERROR"
 
-
-# Annotate all comments
+# Annotate all comments with batching
 def annotate_comments(output_path="data/labeled/labeled_comments.json"):
     os.makedirs("data/labeled", exist_ok=True)
     comments = load_all_comments()
+
+    if not comments:
+        print("⚠️ No comments found in raw directory.")
+        return
+
     generator = load_deepseek_pipeline()
     labeled = []
 
-    for comment in tqdm(comments, desc="Annotating"):
-        label = classify_comment(comment.get("body", ""), generator)
-        if label != "ERROR":
-            comment["label"] = label
-            labeled.append(comment)
+    # Process in batches
+    for i in tqdm(range(0, len(comments), BATCH_SIZE), desc="Annotating"):
+        batch = comments[i:i + BATCH_SIZE]
+        prompts = []
+        metadata = []
+
+        for comment in batch:
+            title = comment.get("post_title") or comment.get("title") or ""
+            body = comment.get("body", "")
+            if not title or not body:
+                continue
+            prompts.append(generate_prompt(title, body))
+            metadata.append(comment)
+
+        try:
+            outputs = generator(prompts, max_new_tokens=10, do_sample=False)
+            for out, meta in zip(outputs, metadata):
+                result = out['generated_text']
+                label = extract_label(result)
+                if label != "ERROR":
+                    meta["label"] = label
+                    labeled.append(meta)
+        except Exception as e:
+            print(f"Batch error: {e}")
+            continue
 
     with open(output_path, "w") as f:
         json.dump(labeled, f, indent=2)
 
+    print(f"\n✅ Annotated {len(labeled)} comments → saved to: {output_path}")
 
 if __name__ == "__main__":
     annotate_comments()
